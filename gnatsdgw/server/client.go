@@ -103,7 +103,7 @@ type client struct {
 	cid string
 	typ int
 
-	r  io.Reader
+	nc io.ReadWriter
 	wc io.WriteCloser
 
 	srv fakeSrv
@@ -133,13 +133,14 @@ func NewForwarder(opts *Options) Forwarder {
 	return cli
 }
 
-func (c *client) Run(typ Type, r io.Reader, wc io.WriteCloser) {
+func (c *client) Run(typ Type, cid string, nc io.ReadWriter, wc io.WriteCloser) {
 	if typ == CLIENT2BACKEND {
 		c.typ = CLIENT
 	} else {
 		c.typ = BACKEND
 	}
-	c.r, c.wc = r, wc
+	c.nc, c.wc = nc, wc
+	c.cid = cid
 	c.readLoop()
 }
 
@@ -164,7 +165,7 @@ func (c *client) readLoop() {
 	defer c.closeConnection()
 
 	if !c.pipe.started {
-		nc := c.r
+		nc := c.nc
 		// Start read buffer.
 		b := make([]byte, startBufSize)
 		for !c.pipe.started {
@@ -174,8 +175,8 @@ func (c *client) readLoop() {
 			}
 
 			if err := c.parse(b[:n]); err != nil {
-				if err != ErrMaxPayload {
-					c.Errorf("Error reading from client %s: %s", c.cid, err.Error())
+				if err != ErrMaxPayload && err != ErrAuthorization {
+					c.Errorf("Reading %s %s", c.typeString(), err.Error())
 					c.sendErr("Parser Error")
 				}
 				return
@@ -183,7 +184,7 @@ func (c *client) readLoop() {
 		}
 	}
 
-	_, err := io.Copy(c.wc, c.r)
+	_, err := io.Copy(c.wc, c.nc)
 	if err != io.EOF {
 		c.Errorf("%s readLoop exited with error: %v", c.cid, err)
 	}
@@ -201,11 +202,14 @@ func (c *client) processConnect(arg []byte) error {
 		}
 		if newCmd != nil {
 			cmd = newCmd
+			c.traceInOp("CONNECT NEW", cmd.Payload)
 		}
 	}
 	msgh := connHdr[:len(connHdr)]
 	msgh = append(msgh, cmd.Payload...)
-	msgh = append(msgh, crlfBytes...)
+	if !bytes.HasSuffix(cmd.Payload, crlfBytes) {
+		msgh = append(msgh, crlfBytes...)
+	}
 	_, err := c.wc.Write(msgh)
 	if err == nil {
 		return err
@@ -363,6 +367,7 @@ func (c *client) processSub(argo []byte) error {
 		}
 		if newCmd != nil {
 			sub = newCmd
+			c.traceInOp("SUB NEW", []byte(fmt.Sprintf("SUB %s %s %s", sub.Subject, sub.Queue, sub.SID)))
 		}
 	}
 	msgh := subHdr[:len(subHdr)]
@@ -404,6 +409,7 @@ func (c *client) processUnsub(arg []byte) error {
 		}
 		if newCmd != nil {
 			unsub = newCmd
+			c.traceInOp("SUB NEW", []byte(fmt.Sprintf("UNSUB %s %v", unsub.SID, unsub.Max)))
 		}
 	}
 	msgh := unsubHdr[:len(unsubHdr)]
@@ -423,18 +429,27 @@ func (c *client) processUnsub(arg []byte) error {
 // Used for handrolled itoa
 const digits = "0123456789"
 
-func (c *client) processMsg(msg []byte) error {
-
+func (c *client) processMsg(msg []byte) (err error) {
 	if c.typ == CLIENT {
 		if c.trace {
-			c.traceMsg(msg, false)
+			c.traceMsg(msg, false, false)
 		}
-		return c.publishMsg(msg)
+		err = c.publishMsg(msg)
+	} else {
+		if c.trace {
+			c.traceMsg(msg, true, false)
+		}
+		err = c.deliverMsg(msg)
 	}
-	if c.trace {
-		c.traceMsg(msg, true)
+	if err != nil {
+		if err == ErrAuthorization {
+			c.authViolation()
+			return
+		}
+		c.sendErr(err.Error())
+		c.Errorf("MSG, %v: [%s]", err, string(msg[:len(msg)-LEN_CR_LF]))
 	}
-	return c.deliverMsg(msg)
+	return
 }
 
 func (c *client) publishMsg(msg []byte) error {
@@ -450,14 +465,16 @@ func (c *client) publishMsg(msg []byte) error {
 		}
 		if newCmd != nil {
 			cmd = newCmd
+			if !bytes.HasSuffix(cmd.Msg, crlfBytes) {
+				cmd.Msg = append(cmd.Msg, crlfBytes...)
+			}
+			if c.trace {
+				c.traceMsg(cmd.Msg, false, true)
+			}
 		}
 	}
 	data := cmd.Msg
-	hasCRLF := bytes.HasSuffix(data, crlfBytes)
-	lenData := len(data)
-	if hasCRLF {
-		lenData -= 2
-	}
+	lenData := len(data) - 2
 	maxPayload := c.srv.getOpts().MaxPayload
 	if lenData > maxPayload {
 		c.maxPayloadViolation(lenData, int64(maxPayload))
@@ -491,9 +508,6 @@ func (c *client) publishMsg(msg []byte) error {
 	if err == nil {
 		_, err = c.wc.Write(data)
 	}
-	if err == nil && !hasCRLF {
-		_, err = c.wc.Write(crlfBytes)
-	}
 	if err != nil {
 		return err
 	}
@@ -514,6 +528,10 @@ func (c *client) deliverMsg(msg []byte) error {
 		}
 		if newCmd != nil {
 			cmd = newCmd
+			if !bytes.HasSuffix(cmd.Msg, crlfBytes) {
+				cmd.Msg = append(cmd.Msg, crlfBytes...)
+			}
+			c.traceMsg(cmd.Msg, false, true)
 		}
 	}
 
@@ -532,11 +550,7 @@ func (c *client) deliverMsg(msg []byte) error {
 	}
 	// append size
 	data := cmd.Msg
-	hasCRLF := bytes.HasSuffix(data, crlfBytes)
-	lenData := len(data)
-	if hasCRLF {
-		lenData -= 2
-	}
+	lenData := len(data) - 2
 	var b [12]byte
 	var i = len(b)
 	if lenData > 0 {
@@ -551,9 +565,6 @@ func (c *client) deliverMsg(msg []byte) error {
 	msgh = append(msgh, b[i:]...)
 	msgh = append(msgh, CR_LF...)
 	msgh = append(msgh, data...)
-	if !hasCRLF {
-		msgh = append(msgh, CR_LF...)
-	}
 	_, err := c.wc.Write(msgh)
 	if err == nil {
 		return err
@@ -574,11 +585,14 @@ func (c *client) processInfo(arg []byte) error {
 		}
 		if newCmd != nil {
 			cmd = newCmd
+			c.traceInOp("INFO NEW", cmd.Payload)
 		}
 	}
 	msgh := infoHdr[:len(infoHdr)]
 	msgh = append(msgh, cmd.Payload...)
-	msgh = append(msgh, crlfBytes...)
+	if !bytes.HasSuffix(cmd.Payload, crlfBytes) {
+		msgh = append(msgh, crlfBytes...)
+	}
 	_, err := c.wc.Write(msgh)
 	if err == nil {
 		return err
@@ -587,7 +601,9 @@ func (c *client) processInfo(arg []byte) error {
 }
 
 // do not handle -ERR
-func (c *client) processErr(errStr string) {}
+func (c *client) processErr(errStr string) {
+	c.traceOutOp("-ERR", []byte(errStr))
+}
 
 func (c *client) maxPayloadViolation(sz int, max int64) {
 	c.Errorf("%s: %d vs %d", ErrMaxPayload.Error(), sz, max)
@@ -597,8 +613,7 @@ func (c *client) maxPayloadViolation(sz int, max int64) {
 
 func (c *client) sendErr(err string) {
 	if c.typ == CLIENT {
-		// only send error from backend->client which typ is CLIENT
-		c.wc.Write([]byte(fmt.Sprintf("-ERR '%s'\r\n", err)))
+		c.nc.Write([]byte(fmt.Sprintf("-ERR '%s'\r\n", err)))
 	}
 }
 
@@ -616,6 +631,7 @@ func (c *client) typeString() string {
 
 func (c *client) closeConnection() {
 	c.closeOnce.Do(func() {
+		c.Debugf("Connection closed %s - %s", c.cid, c.typeString())
 		c.wc.Close()
 	})
 }
@@ -632,17 +648,24 @@ func (c *client) processPong() {
 	c.wc.Write(pongBytes)
 }
 
-func (c *client) authViolation() {}
+func (c *client) authViolation() {
+	c.sendErr("Authorization Violation")
+	c.closeConnection()
+}
 
-func (c *client) traceMsg(msg []byte, out bool) {
+func (c *client) traceMsg(msg []byte, out, mod bool) {
 	if !c.trace {
 		return
 	}
+	var modStr string
+	if mod {
+		modStr = " NEW"
+	}
 	if out {
-		c.Debugf("<<- MSG_PAYLOAD: [%s]", string(msg[:len(msg)-LEN_CR_LF]))
+		c.Debugf("<<- MSG_PAYLOAD%s: [%s]", modStr, string(msg[:len(msg)-LEN_CR_LF]))
 		return
 	}
-	c.Debugf("->> MSG_PAYLOAD: [%s]", string(msg[:len(msg)-LEN_CR_LF]))
+	c.Debugf("->> MSG_PAYLOAD%s: [%s]", modStr, string(msg[:len(msg)-LEN_CR_LF]))
 }
 
 func (c *client) traceInOp(op string, arg []byte) {

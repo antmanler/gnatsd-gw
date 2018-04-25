@@ -94,16 +94,24 @@ func NewServer(opts *fwd.Options, dialer Dialer, mim MiM) (func(net.Conn) error,
 		c2b.Set(B2CConnKey, backend)
 		c2b.Set(C2BConnKey, conn)
 
+		var cid string
+		remoteAddrStr, ok := conn.(interface{ RemoteAddrString() string })
+		if ok {
+			cid = fmt.Sprintf("%s", remoteAddrStr.RemoteAddrString())
+		} else {
+			cid = fmt.Sprintf("%s", conn.RemoteAddr().String())
+		}
+
 		// kick start
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			c2b.Run(fwd.CLIENT2BACKEND, conn, backend)
+			c2b.Run(fwd.CLIENT2BACKEND, cid, conn, backend)
 		}()
 		go func() {
 			defer wg.Done()
-			b2c.Run(fwd.BACKEND2CLIENT, backend, conn)
+			b2c.Run(fwd.BACKEND2CLIENT, cid, backend, conn)
 		}()
 		wg.Wait()
 		return nil
@@ -173,6 +181,7 @@ func CloneOpts(opts *fwd.Options) *fwd.Options {
 	if cloned.Logger == nil {
 		cloned.Logger = loggerNoOp{}
 	}
+	cloned.Handlers.OnConnect = opts.Handlers.OnConnect
 	cloned.Handlers.OnInfo = opts.Handlers.OnInfo
 	cloned.Handlers.OnMsg = opts.Handlers.OnMsg
 	cloned.Handlers.OnPublish = opts.Handlers.OnPublish

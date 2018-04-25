@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -54,6 +55,9 @@ var defaultUpgrader = websocket.Upgrader{
 type Conn struct {
 	*websocket.Conn
 
+	cr  io.Reader
+	err error
+
 	// addition info from request
 	Request struct {
 		Header     http.Header
@@ -68,11 +72,24 @@ type Conn struct {
 var _ net.Conn = (*Conn)(nil)
 
 func (wsc *Conn) Read(b []byte) (n int, err error) {
-	_, rd, err := wsc.Conn.NextReader()
-	if err != nil {
-		return 0, err
+	if wsc.err != nil {
+		err = wsc.err
+		return
 	}
-	return rd.Read(b)
+	if wsc.cr == nil {
+		_, rd, err := wsc.Conn.NextReader()
+		if err != nil {
+			wsc.err = err
+			return 0, io.EOF
+		}
+		wsc.cr = rd
+	}
+	n, err = wsc.cr.Read(b)
+	if err == io.EOF {
+		wsc.cr = nil
+		err = nil
+	}
+	return
 }
 
 func (wsc *Conn) Write(b []byte) (n int, err error) {
@@ -91,4 +108,9 @@ func (wsc *Conn) SetDeadline(t time.Time) error {
 		return err
 	}
 	return nil
+}
+
+// RemoteAddrString returns string in request
+func (wsc *Conn) RemoteAddrString() string {
+	return wsc.Request.RemoteAddr
 }

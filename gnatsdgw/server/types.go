@@ -31,7 +31,7 @@ const (
 // Forwarder is interface for a remote connection from user to upstream NATS server
 type Forwarder interface {
 	// Block and run ioloop
-	Run(typ Type, r io.Reader, wc io.WriteCloser)
+	Run(typ Type, cid string, nc io.ReadWriter, wc io.WriteCloser)
 
 	// Stops the furture insepction, pipe the following inbound bytes to backend server.
 	PipeIO()
