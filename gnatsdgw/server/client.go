@@ -174,8 +174,7 @@ func (c *client) readLoop() {
 			}
 
 			if err := c.parse(b[:n]); err != nil {
-				// handled inline
-				if err != ErrMaxPayload && err != ErrAuthorization {
+				if err != ErrMaxPayload {
 					c.Errorf("Error reading from client %s: %s", c.cid, err.Error())
 					c.sendErr("Parser Error")
 				}
