@@ -5,11 +5,20 @@ A utility lib make it easy to write a gateway in front of gnatsd with middleware
 Features:
 
 - Leverage the official zero-alloc parser to handle connections
-- Can inspect every commands in nats proto
+- Can inspect most commands in nats proto
 - TCP & Websocket gateway
+- Embeded as a library
+
+## How it works
+
+Thanks to the clean design of gnatsd, I synced the parser.go from [gnatsd/server/parser.go](https://github.com/nats-io/gnatsd/blob/master/server/parser.go) and rewrite missing method in client wrap it as a unidirectional fowarder leaving custom callbacks to handle protocal commands.
+
+ - CLIENT -> BACKEND share the logical of serving a client in nats server,
+ - BACKEND -> CLIENT share the logical of serving a router.
 
 ## Basic usage
 
+Building a websocket gateway to use nats in browser.
 
 ```go
 package main
@@ -24,11 +33,6 @@ import (
 	fwd "github.com/antmanler/gnatsd-gw/gnatsdgw/server"
 	"github.com/antmanler/gnatsd-gw/gnatsdgw/ws"
 )
-
-func usage() {
-	fmt.Printf(`Usage: %s [ --help ] [ --no-origin-check ] [ --trace ]
-`, os.Args[0])
-}
 
 func main() {
 
@@ -126,6 +130,14 @@ type MsgCmd struct {
 type MsgHandler func(client Forwarder, cmd *MsgCmd) (newCmd *MsgCmd, err error)
 ```
 
+### More use cases
+
+- Act as border gateway enforce tls for connections from public
+- Rewrite requests, publish subject
+- Filter out illegal messages passing thru the gateway
+- Modify message, for example adding extra fields or tags which is tranparent to users
+- Route message to another subject
+
 
 ##  Dev
 
@@ -134,3 +146,14 @@ Keep `parser.go` up to date with officail
 ```shell
 curl 'https://raw.githubusercontent.com/nats-io/gnatsd/master/server/parser.go' > /tmp/parser.go && vimdiff gnatsdgw/server/parser.go /tmp/parser.go
 ```
+
+## Credits
+
+### Parser
+
+- [gnatsd](https://github.com/nats-io/gnatsd) High-Performance server for NATS, the cloud native messaging system.
+
+## Inspired by
+
+- [nats-websocket-gw](https://github.com/orus-io/nats-websocket-gw) A websocket to NATS gateway
+- [websocket-nats](https://github.com/isobit/websocket-nats) An in-browser websocket client for NATS
