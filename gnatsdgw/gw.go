@@ -37,7 +37,7 @@ type Accepter func(conn net.Conn) (newConn net.Conn, err error)
 // MiM is Man in the Middle configs to handle TLS handshakes in nats' protocal
 type MiM struct {
 	Connector Connector
-	Acceppter Accepter
+	Accepter  Accepter
 }
 
 // User can access underlying connections using forwarder's kv methods
@@ -54,16 +54,35 @@ var (
 func NewServer(opts *fwd.Options, dialer Dialer, mim MiM) (func(net.Conn) error, error) {
 	opts = CloneOpts(opts)
 	return func(conn net.Conn) error {
+		var errOnce sync.Once
+		closeOnError := func(err error) {
+			errOnce.Do(func() {
+				if conn != nil {
+					var errMsg string
+					if err == fwd.ErrAuthorization {
+						errMsg = "Authorization Violation"
+					} else {
+						errMsg = err.Error()
+					}
+					conn.Write([]byte(fmt.Sprintf("-ERR %s\r\n", errMsg)))
+				}
+			})
+		}
+
 		backend, err := dialer()
 		if err != nil {
+			closeOnError(err)
 			return err
 		}
+		defer backend.Close()
+
 		// read connection
 		ctrline := new(control)
 		if err := readOp(backend, ctrline); err != nil {
 			return err
 		}
 		if ctrline.op != "INFO" {
+			closeOnError(errNoInfoReceived)
 			return errNoInfoReceived
 		}
 		b2c := fwd.NewForwarder(opts)
@@ -77,6 +96,7 @@ func NewServer(opts *fwd.Options, dialer Dialer, mim MiM) (func(net.Conn) error,
 		if mim.Connector != nil {
 			backend, infoCmd, err = mim.Connector(backend, infoCmd)
 			if err != nil {
+				closeOnError(err)
 				return err
 			}
 			// update connection
@@ -85,6 +105,7 @@ func NewServer(opts *fwd.Options, dialer Dialer, mim MiM) (func(net.Conn) error,
 		if opts.Handlers.OnInfo != nil {
 			newCmd, err := opts.Handlers.OnInfo(b2c, infoCmd)
 			if err != nil {
+				closeOnError(err)
 				return err
 			}
 			if newCmd != nil {
@@ -98,10 +119,14 @@ func NewServer(opts *fwd.Options, dialer Dialer, mim MiM) (func(net.Conn) error,
 		}
 
 		// handle tls
-		if mim.Acceppter != nil {
-			conn, err = mim.Acceppter(conn)
+		if mim.Accepter != nil {
+			newConn, err := mim.Accepter(conn)
 			if err != nil {
+				closeOnError(err)
 				return err
+			}
+			if newConn != nil {
+				conn = newConn
 			}
 		}
 		c2b := fwd.NewForwarder(opts)

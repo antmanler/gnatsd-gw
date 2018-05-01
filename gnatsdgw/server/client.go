@@ -198,6 +198,9 @@ func (c *client) processConnect(arg []byte) error {
 	if c.opts.Handlers.OnConnect != nil {
 		newCmd, err := c.opts.Handlers.OnConnect(c, cmd)
 		if err != nil {
+			if err == ErrAuthorization {
+				c.authViolation()
+			}
 			return err
 		}
 		if newCmd != nil {
