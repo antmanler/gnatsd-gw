@@ -215,7 +215,7 @@ func CloneOpts(opts *fwd.Options) *fwd.Options {
 		cloned.MaxControlLine = fwd.MAX_CONTROL_LINE_SIZE
 	}
 	if cloned.MaxPayload <= 0 {
-		cloned.MaxPayload = fwd.MAX_CONTROL_LINE_SIZE
+		cloned.MaxPayload = fwd.MAX_PAYLOAD_SIZE
 	}
 	if cloned.Logger == nil {
 		cloned.Logger = loggerNoOp{}
