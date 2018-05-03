@@ -603,9 +603,13 @@ func (c *client) processInfo(arg []byte) error {
 	return nil
 }
 
-// do not handle -ERR
 func (c *client) processErr(errStr string) {
-	c.traceOutOp("-ERR", []byte(errStr))
+	errBytes := []byte(errStr)
+	c.traceOutOp("-ERR", errBytes)
+	if c.typ != CLIENT {
+		// forward error
+		c.wc.Write(append(errHdr, append(errBytes, crlfBytes...)...))
+	}
 }
 
 func (c *client) maxPayloadViolation(sz int, max int64) {
